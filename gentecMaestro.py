@@ -2,7 +2,7 @@ import serial
 import time
 import math
 
-class MaestroMonitor:
+class gentecMaestro:
     def __init__(self, port_name='COM1'):
         """
         Initializes the connection to the MAESTRO using the settings 
@@ -43,6 +43,7 @@ class MaestroMonitor:
                         value = float(line)
                         measurements.append(value)
                     except ValueError:
+                        print("measurement received non-numeric data:", line)
                         continue # Ignore non-numeric lines (e.g., startup noise)
         
         finally:
@@ -76,7 +77,8 @@ class MaestroMonitor:
         return {
             "average_power": avg_power,
             "rms_stability": rms_stability,
-            "ptp_stability": ptp_stability
+            "ptp_stability": ptp_stability,
+            "num_measurements": len(measurements)
         }
 
     def close(self):
@@ -87,7 +89,7 @@ class MaestroMonitor:
 # --- Example Usage ---
 if __name__ == "__main__":
     # Replace 'COM3' with your actual USB Serial Port
-    monitor = MaestroMonitor(port_name='COM3')
+    monitor = gentecMaestro(port_name='COM11')
     
     try:
         print("Starting 5-second measurement...")
@@ -97,6 +99,7 @@ if __name__ == "__main__":
             print(f"Average Power: {stats['average_power']:.4e} W")
             print(f"RMS Stability: {stats['rms_stability']:.2f} %")
             print(f"PTP Stability: {stats['ptp_stability']:.2f} %")
+            print(f"Number of Measurements: {stats['num_measurements']}")
         else:
             print("No data received.")
             
