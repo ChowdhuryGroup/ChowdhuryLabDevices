@@ -19,6 +19,7 @@ class OWISController:
             self.term_char = '\r'
             self.ser.reset_input_buffer()
             self.ser.reset_output_buffer()
+            self.current_angle = 0.0
             
             print(f"Connected to {port}. Executing 3-Phase sequence with torque boost...")
 
@@ -84,19 +85,34 @@ class OWISController:
     def _degrees_to_counts(self, degrees):
         return int(degrees * self.STEPS_PER_DEGREE)
 
-    def move_relative_angle(self, degrees):
+    def move_relative_angle(self, degrees, quiet=False):
         counts = self._degrees_to_counts(degrees)
+        
+        # Update software tracking
+        self.current_angle = (self.current_angle + degrees) % 360
+        
         self.send_command("relat1")
         self.send_command(f"pset1={counts}")
         self.send_command("pgo1")
-        print(f"Moving Relative: {degrees} deg ({counts} counts)")
+        
+        if not quiet:
+            print(f"Moving Relative: {degrees} deg ({counts} counts) | New Heading: {self.current_angle:.2f}°")
 
-    def move_absolute_angle(self, degrees):
-        counts = self._degrees_to_counts(degrees)
-        self.send_command("absol1")
-        self.send_command(f"pset1={counts}")
-        self.send_command("pgo1")
-        print(f"Moving Absolute: {degrees} deg ({counts} counts)")
+    def move_absolute_angle(self, degrees, shortest_path=True):
+        # Ensure target is within 0-360
+        target_angle = degrees % 360 
+        
+        # Calculate raw difference
+        degrees_to_move = target_angle - self.current_angle
+
+        # Force the stage to take the quickest route (<= 180 degrees)
+        if shortest_path:
+            degrees_to_move = (degrees_to_move + 180) % 360 - 180
+
+        # Pass quiet=True to suppress the relative move print statement
+        self.move_relative_angle(degrees_to_move, quiet=True)
+        
+        print(f"Moving Absolute to: {target_angle} deg (Moved {degrees_to_move:.2f} deg) | New Heading: {self.current_angle:.2f}°")
 
     def close(self):
         if self.ser.is_open:
