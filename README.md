@@ -13,6 +13,7 @@ A collection of lightweight Python classes designed for seamless device integrat
 * **Newport Delay Line Stage**: .NET-powered control for DLS series stages, featuring automated homing and absolute/relative positioning.
 * **OWIS MDE235 Rotator**: High-precision rotation stage control with specialized 3-phase initialization sequences for torque-aligned microstepping.
 * **Melles Griot Nanomotion II**: Linear motor control including speed regulation, software limits, and "park/unpark" safety routines.
+* **VXM Stage Controller** Stepper motor controller with full control for precise large distance sample or optic positioning.
 
 ### **Timing & Signal Generation**
 * **Stanford DG645**: Digital delay generator control for triggering and precise multi-channel delay/width synchronization.
