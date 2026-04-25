@@ -1,208 +1,180 @@
 import pyvisa
 import numpy as np
 import matplotlib.pyplot as plt
-import time
 import sys
-
+import time
 
 class Oscilloscope:
-
-    def __init__(self) -> None:
+    def __init__(self, instrumentID=None):
         if sys.platform == "win32":
             self.rm = pyvisa.ResourceManager("C:\\Windows\\System32\\visa32")
         else:
-            print("Locate the visa32.so file and add it in here")
             self.rm = pyvisa.ResourceManager()
-        print("VISA Successfully Loaded")
-        print("Looking for instruments...")
-        inst_list = self.rm.list_resources()
-        print("Instrument list:")
-        print(inst_list)
-        index = input("Select instrument by typing index\n")
-        self.inst = self.rm.open_resource(inst_list[int(index)])
+            
+        if instrumentID is None:
+            inst_list = self.rm.list_resources()
+            print(f"Available instruments: {inst_list}")
+            index = int(input("Select instrument by typing index:\n"))
+            instrumentID = inst_list[index]
+            
+        self.inst = self.rm.open_resource(instrumentID)
+        self.inst.timeout = 300000  # 300 seconds is usually plenty
+        print(f"Connected: {self.inst.query('*IDN?')}")
 
-        print("ID of connected instrument")
-        print(self.inst.query("*IDN?"))
-
-        # I think this gives the maximum number of data points...
+        # Standard waveform settings
         self.inst.write(":WAVeform:POINts:MODE MAX")
-
-        # Set output format
-        self.inst.write(
-            ":WAVeform:FORMat WORD"
-        )  # 16 bit WORD format... or BYTE for 8 bit format
-        self.inst.write(":WAVeform:UNSigned 0")  # Set signed integer
-        self.inst.write(
-            ":WAVeform:BYTeorder LSBFirst"
-        )  # Most computers use Least Significant Bit First
-
-        #set 6 second timeout for SE probe
-        self.inst.timeout = 60000
-
-        self.raw_data = []
-        self.data = []
+        self.inst.write(":WAVeform:FORMat WORD")
+        self.inst.write(":WAVeform:UNSigned 0")
+        self.inst.write(":WAVeform:BYTeorder LSBFirst")
 
     def select_channels(self, channels: tuple):
-        #Channel here is literally Channel 1, Channel 2. Do not start from Channel 0
-        self.channels = channels
         for i in range(1, 5):
-            self.inst.write(":CHANnel" + str(i) + ":DISPlay OFF")
-        for i in channels:
-            self.inst.write(":CHANnel" + str(i) + ":DISPlay ON")
+            state = "ON" if i in channels else "OFF"
+            self.inst.write(f":CHANnel{i}:DISPlay {state}")
 
-    def get_preamble(self):
-        # Get waveform preamble
-        """
-        FORMAT: int16 - 0 = BYTE, 1 = WORD, 4 = ASCII.
-        TYPE: int16 - 0 = NORMAL, 1 = PEAK DETECT, 2 = AVERAGE
-        POINTS: int32 - number of data points transferred.
-        COUNT: int32 - 1 and is always 1.
-        XINCREMENT: float64 - time difference between data points.
-        XORIGIN: float64 - always the first data point in memory.
-        XREFERENCE: int32 - specifies the data point associated with x-origin.
-        YINCREMENT: float32 - voltage diff between data points.
-        YORIGIN: float32 - value is the voltage at center screen.
-        YREFERENCE: int32 - specifies the data point where y-origin occurs.
-        """
-        preamble_keys = [
-            "format",
-            "type",
-            "points",
-            "count",
-            "xincrement",
-            "xorigin",
-            "xreference",
-            "yincrement",
-            "yorigin",
-            "yreference",
-        ]
+    def configure_timebase(self, duration: float, offset: float = 0.0):
+        self.inst.write(f":TIMebase:RANGe {duration}")
+        self.inst.write(f":TIMebase:POSition {offset}")
 
-        preamble_data = self.inst.query(":WAVeform:PREamble?").split(",")
-        print("Preamble Query Completed")
-        preamble_data[-1] = preamble_data[-1][:-1]
-        self.preamble = dict(zip(preamble_keys, preamble_data))
+    def _get_preamble(self, channel: int) -> dict:
+        self.inst.write(f":WAVeform:SOURce CHANnel{channel}")
+        raw = self.inst.query(":WAVeform:PREamble?").split(",")
+        keys = ["format", "type", "points", "count", "xincrement", "xorigin", 
+                "xreference", "yincrement", "yorigin", "yreference"]
+        return dict(zip(keys, [float(x) for x in raw]))
 
-    def set_signal_duration(self, duration: float):
-        self.duration = duration
-        # Set signal duration in seconds (maximum 500s)
-        self.inst.write(":TIMebase:RANGe " + str(duration))
+    def _scale_data(self, raw_data: np.ndarray, preamble: dict) -> np.ndarray:
+        return (raw_data - preamble["yreference"]) * preamble["yincrement"] + preamble["yorigin"]
 
-    def get_channel_offset(self, channel: int):
-        if channel not in [1, 2, 3, 4]:
-            raise ValueError("Channel can only be one of 1, 2, 3, or 4")
-        return float(self.inst.query(":CHANnel" + str(channel) + ":OFFSet?"))
-
-    def single_acquisition(self, duration: float):
-        self.set_signal_duration(duration)
-        # Start a single acquisition
+    def _get_times(self, length: int, preamble: dict) -> np.ndarray:
+        return (np.arange(length) - preamble["xreference"]) * preamble["xincrement"] + preamble["xorigin"]
+    def set_real_time_mode(self):
+        self.inst.write(":ACQuire:MODE RTIMe")
+        self.inst.write(":RUN")
+    def acquire_single(self, channels: tuple) -> dict:
+        self.set_real_time_mode()
         self.inst.write(":SINGle")
-        self.inst.query("*OPC?")  # wait until done
-        # time.sleep(0.1)
-        print("Getting Preamble")
-        self.get_preamble()
-        print("Finished Getting Preamble")
-        self.offsets = [self.get_channel_offset(channel) for channel in self.channels]
-        print("offsets: ", self.offsets)
-        self.raw_data = []
-        for channel in self.channels:
-            # h is signed WORD, H is unsigned WORD
-            self.raw_data.append(
-                self.inst.query_binary_values(
-                    ":WAVeform:SOURce CHANnel" + str(channel) + ";:WAVeform:DATA?",
-                    container=np.array,
-                    datatype="h",
-                    is_big_endian=False,
-                )
-            )
+        self.inst.query("*OPC?") 
 
-    def start_single_acquisition(self,duration:float):
-        self.set_signal_duration(duration)
-        # Start a single acquisition
+        results = {}
+        for ch in channels:
+            self.inst.write(f":WAVeform:SOURce CHANnel{ch}")
+            preamble = self._get_preamble(ch)
+            raw = self.inst.query_binary_values(
+                ":WAVeform:DATA?", datatype="h", container=np.array, is_big_endian=False
+            )
+            
+            results[ch] = {
+                "times": self._get_times(len(raw), preamble),
+                "voltages": self._scale_data(raw, preamble)
+            }
+        return results
+    def acquire_segmented(self, channels: tuple, segment_count: int,laser_to_open_and_close = None,shutter_open_time = None) -> dict:
+        self.inst.write(":ACQuire:MODE SEGMented")
+        self.inst.write(f":ACQuire:SEGMented:COUNt {segment_count}")
         self.inst.write(":SINGle")
+        if laser_to_open_and_close is not None:
+            time.sleep(.5)
+            laser_to_open_and_close.open_shutter()
+            time.sleep(shutter_open_time)  # Wait for the shutter to be open and triggers to be captured
+        # Increase timeout temporarily to wait for the triggers to finish
+        if laser_to_open_and_close is not None:
+            laser_to_open_and_close.close_shutter()
+        self.inst.query("*OPC?")
 
-    def read_acquisition(self):
-        self.inst.query("*OPC?")  # wait until done
-        # time.sleep(0.1)
-        print("Getting Preamble")
-        self.get_preamble()
-        print("Finished Getting Preamble")
-        self.offsets = [self.get_channel_offset(channel) for channel in self.channels]
-        print("offsets: ", self.offsets)
-        self.raw_data = []
-        for channel in self.channels:
-            # h is signed WORD, H is unsigned WORD
-            self.raw_data.append(
-                self.inst.query_binary_values(
-                    ":WAVeform:SOURce CHANnel" + str(channel) + ";:WAVeform:DATA?",
-                    container=np.array,
-                    datatype="h",
-                    is_big_endian=False,
+
+        # --- THE SPEED FIX: Tell the scope to send ALL segments at once ---
+        self.inst.write(":WAVeform:SEGMented:ALL ON")
+
+        results = {}
+        for ch in channels:
+            self.inst.write(f":WAVeform:SOURce CHANnel{ch}")
+            preamble = self._get_preamble(ch)
+            
+            # This now downloads all 80 segments in one giant block!
+            raw_flat = self.inst.query_binary_values(
+                ":WAVeform:DATA?", datatype="h", container=np.array, is_big_endian=False
+            )
+            
+            # Convert the giant 1D array to floats using the preamble
+            scaled_flat = self._scale_data(raw_flat, preamble)
+            
+            # Reshape into a 2D array: (segment_count, points_per_segment)
+            points_per_seg = len(raw_flat) // segment_count
+            segments_2d = scaled_flat.reshape((segment_count, points_per_seg))
+            
+            results[ch] = {
+                "times": self._get_times(points_per_seg, preamble),
+                # list() converts the 2D array back to a list of 1D arrays to match your script
+                "segments": list(segments_2d) 
+            }
+            
+        # Turn it back off to not mess up future single-acquisitions
+        self.inst.write(":WAVeform:SEGMented:ALL OFF")
+        
+        return results
+
+
+    def acquire_segmentedOld(self, channels: tuple, segment_count: int) -> dict:
+        self.inst.write(":ACQuire:MODE SEGMented")
+        self.inst.write(f":ACQuire:SEGMented:COUNt {segment_count}")
+        self.inst.write(":SINGle")
+        self.inst.query("*OPC?") 
+
+        results = {}
+        for ch in channels:
+            self.inst.write(f":WAVeform:SOURce CHANnel{ch}")
+            preamble = self._get_preamble(ch)
+            
+            segments = []
+            for i in range(1, segment_count + 1):
+                self.inst.write(f":ACQuire:SEGMented:INDex {i}")
+                raw = self.inst.query_binary_values(
+                    ":WAVeform:DATA?", datatype="h", container=np.array, is_big_endian=False
                 )
-            )
-        self.process_data()
-
-
-    # Transform binary IEEE 488.2 data to actual values
-    def binary_to_float(self, data):
-        return (
-            (data - int(self.preamble["yreference"]))
-            * float(self.preamble["yincrement"])
-        ) + float(self.preamble["yorigin"])
-
-    def process_data(self):
-        # Calculate time values from preamble
-        self.times = (
-            np.arange(0, int(self.preamble["points"]))
-            - int(self.preamble["xreference"])
-        ) * float(self.preamble["xincrement"]) + float(self.preamble["xorigin"])
-
-        """
-        IEEE 488.2 Data types
-        NR1: Signed integer
-        NR2: Float with no exponent (not used by HP)
-        NR3: Float always with exponent
-        """
-        self.data = []
-        for i in range(len(self.channels)):
-            self.data.append(self.binary_to_float(self.raw_data[i]))
-
-    def plot_data(self):
-        # Plot the data
-        for i in range(len(self.channels)):
-            plt.plot(
-                self.times,
-                self.data[i],
-                label="channel " + str(self.channels[i]),
-                alpha=0.5,
-            )
-        plt.legend()
-        plt.show()
-
-    def get_channel_max_time(self,channel):
-        '''
-        here setting channel = 1 returns oscilliscope channel 2 value
-        '''
-        return self.times[np.argmax(self.data[channel])]
-
-    @property
-    def delay(self):
-        return float(self.inst.query(":TIMebase:POSition?"))
-
-    # @delay.setter
-    # def delay(self, value: float):
-    #     self.inst.write(f":TIMebase:POSition {}")
+                segments.append(self._scale_data(raw, preamble))
+                
+            results[ch] = {
+                "times": self._get_times(len(segments[0]), preamble),
+                "segments": segments
+            }
+        return results
 
 if __name__ == '__main__':
-    print("test")
     scope = Oscilloscope()
-    print(scope.inst.query("*IDN?"))
+    
+    # Configure Scope
+    scope.configure_timebase(duration=1600e-9, offset=500e-9)
+    target_channels = (1,2,3) # Add 2, 3, etc if needed
+    scope.select_channels(target_channels)
 
+    # Acquire Data
+    print("Acquiring segments...")
+    data = scope.acquire_segmented(target_channels, segment_count=10)
 
-    print("Taking Single Acquisition")
-    scope.select_channels([1,2])
-    scope.single_acquisition(150e-9)
-    print("Took aquicsitno")
-    scope.process_data()
-    scope.plot_data()
-    print("Max Channel 1:" , scope.get_channel_max_time(0))
-    print("Max Channel 2:" , scope.get_channel_max_time(1))
+    # Plotting for Channel 1
+    ch1_data = data[1]
+    ch2_data = data[2]
+    ch3_data = data[3]
+
+    ch1times = ch1_data["times"]
+    ch1segments = ch1_data["segments"]
+
+    ch2times = ch2_data["times"]
+    ch2segments = ch2_data["segments"]
+    ch3times = ch3_data["times"]
+    ch3segments = ch3_data["segments"]
+
+    # 1. Plot individual segments
+    plt.figure()
+    for i, seg_volts in enumerate(ch1segments[:5]):
+        plt.plot(ch1times, seg_volts, label=f"Seg {i+1}", alpha=0.6)
+        plt.plot(ch2times, ch2segments[i], label=f"Seg {i+1} Ch2", alpha=0.6)
+        plt.plot(ch3times, ch3segments[i], label=f"Seg {i+1} Ch3", alpha=0.6)
+
+    plt.title("Segmented Acquisition - Channel 1")
+    plt.xlabel("Time (s)")
+    plt.ylabel("Voltage (V)")
+    plt.legend()
+    plt.show()
+
